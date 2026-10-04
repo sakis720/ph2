@@ -5886,6 +5886,7 @@ static void frame(void *userdata) {
     bool start_import_obj_model_popup = false;
     bool start_export_selected_as_obj_popup = false;
     bool start_export_all_as_obj_popup = false;
+    bool start_export_cld_as_obj_popup = false;
     if (ImGui::BeginMainMenuBar()) {
         defer { ImGui::EndMainMenuBar(); };
         if (ImGui::BeginMenu("File")) {
@@ -5934,6 +5935,9 @@ static void frame(void *userdata) {
             }
             if (ImGui::MenuItem("Export All in MAP as OBJ...", nullptr, nullptr, !!g.opened_map_filename)) {
                 start_export_all_as_obj_popup = true;
+            }
+            if (ImGui::MenuItem("Export CLD as OBJ...", nullptr, nullptr, !!g.opened_cld_filename)) {
+                start_export_cld_as_obj_popup = true;
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Convert KG2 to OBJ...")) {
@@ -6151,6 +6155,9 @@ static void frame(void *userdata) {
     if (start_export_all_as_obj_popup) {
         ImGui::OpenPopup("OBJ Export Options - All");
     }
+    if (start_export_cld_as_obj_popup) {
+        ImGui::OpenPopup("OBJ Export Options - CLD");
+    }
 
     bool export_all = false;
     bool popup_export_obj_selected = ImGui::BeginPopupModal("OBJ Export Options - Selected", &popup_bool, ImGuiWindowFlags_AlwaysAutoResize);
@@ -6218,6 +6225,105 @@ static void frame(void *userdata) {
         ImGui::EndPopup();
     }
 
+    auto export_cld_to_obj = [&] (char *cld_obj_export_name) {
+        if (!g.cld.valid) {
+            MsgErr("CLD OBJ Export Error", "No valid CLD data loaded.");
+            return;
+        }
+
+        FILE *obj = PH2CLD__fopen(cld_obj_export_name, "w");
+        if (!obj) {
+            MsgErr("CLD OBJ Export Error", "Couldn't open file \"%s\"!!", cld_obj_export_name);
+            return;
+        }
+        defer { fclose(obj); };
+
+        fprintf(obj, "# .CLD collision export from Psilent pHill 2 Editor (" URL ")\n");
+        fprintf(obj, "# Exported from filename: %s\n", g.opened_cld_filename ? g.opened_cld_filename : "unknown");
+        char time_buf[sizeof("YYYY-MM-DD HH:MM:SS UTC")];
+        {
+            time_t t = time(nullptr);
+            auto result = strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S UTC", gmtime(&t));
+            assert(result);
+        }
+        fprintf(obj, "# Exported at %s\n", time_buf);
+        fprintf(obj, "\n");
+
+        float x_flipper = g.settings.flip_x_on_export ? -1.0f : +1.0f;
+        float y_flipper = g.settings.flip_y_on_export ? -1.0f : +1.0f;
+        float z_flipper = g.settings.flip_z_on_export ? -1.0f : +1.0f;
+
+        int vertex_offset_second = 1;
+        int vertex_offset_third = 2;
+        if (g.settings.invert_face_winding_on_export) {
+            vertex_offset_second = 2;
+            vertex_offset_third = 1;
+        }
+
+        int index_base = 0;
+
+        for (int group = 0; group < 4; group++) {
+            PH2CLD_Face *faces = nullptr;
+            size_t faces_count = 0;
+            if (group == 0) { faces = g.cld.group_0_faces; faces_count = g.cld.group_0_faces_count; }
+            else if (group == 1) { faces = g.cld.group_1_faces; faces_count = g.cld.group_1_faces_count; }
+            else if (group == 2) { faces = g.cld.group_2_faces; faces_count = g.cld.group_2_faces_count; }
+            else { faces = g.cld.group_3_faces; faces_count = g.cld.group_3_faces_count; }
+
+            for (size_t i = 0; i < faces_count; i++) {
+                PH2CLD_Face &face = faces[i];
+                fprintf(obj, "g PH2CLD_G%u_F%u_PH2CLD\n", (unsigned int)group, (unsigned int)i);
+                for (int v = 0; v < (face.quad ? 4 : 3); v++) {
+                    fprintf(obj, "v %f %f %f\n", face.vertices[v][0] * x_flipper, face.vertices[v][1] * y_flipper, face.vertices[v][2] * z_flipper);
+                }
+                int a = index_base + 1;
+                int b = index_base + 1 + vertex_offset_second;
+                int c = index_base + 1 + vertex_offset_third;
+                if (face.quad) {
+                    int d = index_base + 4;
+                    fprintf(obj, "f %d %d %d %d\n", a, b, c, d);
+                } else {
+                    fprintf(obj, "f %d %d %d\n", a, b, c);
+                }
+                fprintf(obj, "\n");
+                index_base += (face.quad ? 4 : 3);
+            }
+        }
+
+        for (size_t i = 0; i < g.cld.group_4_cylinders_count; i++) {
+            PH2CLD_Cylinder &cyl = g.cld.group_4_cylinders[i];
+            fprintf(obj, "g PH2CLD_C%u_PH2CLD\n", (unsigned int)i);
+            fprintf(obj, "v %f %f %f\n", cyl.position[0] * x_flipper, cyl.position[1] * y_flipper, cyl.position[2] * z_flipper);
+            fprintf(obj, "# Cylinder: height=%f radius=%f\n", cyl.height, cyl.radius);
+            fprintf(obj, "\n");
+        }
+
+        LogC(IM_COL32(0,178,59,255), "Exported CLD to %s!", cld_obj_export_name);
+    };
+
+    bool popup_export_obj_cld = ImGui::BeginPopupModal("OBJ Export Options - CLD", &popup_bool, ImGuiWindowFlags_AlwaysAutoResize);
+    if (popup_export_obj_cld) {
+        ImGui::Checkbox("Flip X on Export", &g.settings.flip_x_on_export);
+        ImGui::Checkbox("Flip Y on Export", &g.settings.flip_y_on_export);
+        ImGui::Checkbox("Flip Z on Export", &g.settings.flip_z_on_export);
+        ImGui::Checkbox("Invert Face Winding on Export", &g.settings.invert_face_winding_on_export);
+        ImGui::Separator();
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        if (ImGui::Button("Save...")) {
+            char *cld_obj_export_name = win_import_or_export_dialog(L"Wavefront OBJ\0" "*.obj\0"
+                                                                     "All Files\0" "*.*\0",
+                                                                    L"Save OBJ", false, L"obj");
+            if (cld_obj_export_name) {
+                ImGui::CloseCurrentPopup();
+                export_cld_to_obj(cld_obj_export_name);
+                free(cld_obj_export_name);
+            }
+        }
+        ImGui::SameLine(); if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 
     if (do_control_o_load) {
         char *load = win_import_or_export_dialog(L"Silent Hill 2 Files (*.map; *.cld)\0" "*.map;*.cld;*.map.bak;*.cld.bak\0"
@@ -7371,6 +7477,7 @@ static void frame(void *userdata) {
         // MsgInfo("OBJ Export", "Exported!\nSaved to:\n%s", obj_export_name);
         LogC(IM_COL32(0,178,59,255), "Exported to %s!", obj_export_name);
     };
+
     if (obj_export_name) {
         export_to_obj();
     }
